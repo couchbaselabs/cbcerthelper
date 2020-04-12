@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/chvck/cbcerthelper"
+	"github.com/couchbaselabs/cbcerthelper"
 )
 
 var fConfigPath, fHosts, fHttpUser, fHttpPass, fSshUser, fSshPass, fCertUser, fCertEmail string
