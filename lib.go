@@ -59,16 +59,16 @@ func EnableClientCertAuth(username, password, host string) error {
 		return errors.Wrap(err, "failed to send request")
 	}
 
-	if resp.StatusCode != 200 {
-		b, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			return errors.Wrap(err, "failed to read response body for error")
-		}
-
-		return errors.Wrap(errors.New(string(b)), "server responded with error")
+	if resp.StatusCode == 200 || resp.StatusCode == 202 {
+		return nil
 	}
 
-	return nil
+	b, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return errors.Wrap(err, "failed to read response body for error")
+	}
+
+	return errors.Wrap(errors.New(string(b)), "server responded with error")
 }
 
 func ReloadClusterCert(username, password, host string) error {
