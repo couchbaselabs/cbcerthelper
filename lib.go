@@ -136,6 +136,33 @@ func UploadClusterCA(caBytes []byte, username, password, host string) error {
 	return nil
 }
 
+func LoadTrustedCAs(username, password, host string) error {
+	req, err := http.NewRequest(
+		"POST",
+		fmt.Sprintf("http://%s:%s@%s:8091/node/controller/loadTrustedCAs", username, password, host),
+		nil,
+	)
+	if err != nil {
+		return errors.Wrap(err, "failed to create request")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return errors.Wrap(err, "failed to send request")
+	}
+
+	if resp.StatusCode != 200 {
+		b, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			return errors.Wrap(err, "failed to read response body for error")
+		}
+
+		return errors.Wrap(errors.New(string(b)), "server responded with error")
+	}
+
+	return nil
+}
+
 func createCertRequest(priv *rsa.PrivateKey, commonName string) (*x509.CertificateRequest, []byte, error) {
 	template := x509.CertificateRequest{
 		Subject: pkix.Name{
@@ -295,6 +322,23 @@ func WriteLocalCert(name, certType string, certBytes []byte) error {
 	}
 	if err := certOut.Close(); err != nil {
 		return fmt.Errorf("error closing %s: %v", name, err)
+	}
+	return nil
+}
+
+func CreateCABundle(numRoots int, prefix string) error {
+	name := prefix + ".pem"
+	bundle, err := os.Create(name)
+	if err != nil {
+		return fmt.Errorf("failed to open %s for writing: %v", name, err)
+	}
+	for i := 0; i < numRoots; i++ {
+		name = fmt.Sprintf("%s_%d.pem", prefix, i)
+		ca, err := ioutil.ReadFile(name)
+		if err != nil {
+			return fmt.Errorf("failed to read %s for writing: %v", name, err)
+		}
+		bundle.Write(ca)
 	}
 	return nil
 }
