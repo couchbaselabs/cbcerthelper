@@ -7,6 +7,7 @@ import (
 	goflag "flag"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,7 +23,8 @@ import (
 	"github.com/couchbaselabs/cbcerthelper"
 )
 
-var fConfigPath, fHosts, fHttpUser, fHttpPass, fSshUser, fSshPass, fCertUser, fCertEmail string
+var fConfigPath, fHosts, fHttpUser, fHttpPass, fSshUser, fSshPass, fCertUser, fCertEmail, fClusterVersion string
+var fNumRoots int
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
@@ -47,6 +49,8 @@ func init() {
 	generateCmd.PersistentFlags().StringVar(&fSshPass, "ssh-pass", "", "Password to use for performing operations on hosts over ssh")
 	generateCmd.PersistentFlags().StringVar(&fCertUser, "cert-user", "", "Username to generate certificate for")
 	generateCmd.PersistentFlags().StringVar(&fCertEmail, "cert-email", "", "Email address to generate certificate for")
+	generateCmd.PersistentFlags().IntVar(&fNumRoots, "num-roots", 1, "Number of root CAs to generate")
+	generateCmd.PersistentFlags().StringVar(&fClusterVersion, "cluster-version", "0.0.0", "Cluster version")
 
 }
 
@@ -113,18 +117,31 @@ func generate() {
 
 	nodes := strings.Split(fHosts, ",")
 
-	now := time.Now()
-	priv, rootCert := handleRootCert(now)
-	handleNodeCerts(nodes, now, priv, rootCert, fHttpUser, fHttpPass, fSshUser, fSshPass)
-	handleClientCert(now, priv, rootCert, fCertUser, fCertEmail)
+	var privs = []*rsa.PrivateKey{}
+	var rootCerts = []*x509.Certificate{}
 
-	err := cbcerthelper.EnableClientCertAuth(fHttpUser, fHttpPass, nodes[0])
+	now := time.Now()
+	for rootIndex := 0; rootIndex < fNumRoots; rootIndex++ {
+		priv, rootCert := handleRootCert(now, rootIndex)
+		privs = append(privs, priv)
+		rootCerts = append(rootCerts, rootCert)
+	}
+
+	handleClientCert(now, privs, rootCerts, fCertUser, fCertEmail)
+	handleNodeCerts(nodes, now, privs, rootCerts, fHttpUser, fHttpPass, fSshUser, fSshPass, fClusterVersion)
+
+	err := cbcerthelper.CreateCABundle(fNumRoots, "ca")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = cbcerthelper.EnableClientCertAuth(fHttpUser, fHttpPass, nodes[0])
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func handleRootCert(now time.Time) (*rsa.PrivateKey, *x509.Certificate) {
+func handleRootCert(now time.Time, rootIndex int) (*rsa.PrivateKey, *x509.Certificate) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		log.Fatalf("Failed to generate private key: %v", err)
@@ -135,12 +152,14 @@ func handleRootCert(now time.Time) (*rsa.PrivateKey, *x509.Certificate) {
 		log.Fatalf("Failed to generate root cert: %v", err)
 	}
 
-	err = cbcerthelper.WriteLocalCert("ca.pem", cbcerthelper.CertTypeCertificate, rootCertBytes)
+	name := "ca_" + strconv.Itoa(rootIndex)
+
+	err = cbcerthelper.WriteLocalCert(fmt.Sprintf("%s.pem", name), cbcerthelper.CertTypeCertificate, rootCertBytes)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = cbcerthelper.WriteLocalKey("ca.key", priv)
+	err = cbcerthelper.WriteLocalKey(fmt.Sprintf("%s.key", name), priv)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -148,9 +167,17 @@ func handleRootCert(now time.Time) (*rsa.PrivateKey, *x509.Certificate) {
 	return priv, rootCert
 }
 
-func handleNodeCerts(nodes []string, now time.Time, priv *rsa.PrivateKey, rootCert *x509.Certificate, httpUser, httpPass,
-	sshUser, sshPass string) {
-	for _, host := range nodes {
+func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, rootCerts []*x509.Certificate, httpUser, httpPass,
+	sshUser, sshPass, clusterVersion string) {
+
+	major, minor, _ := tuple(clusterVersion)
+	supportsMultipleRoots := major > 7 || (major == 7 && minor >= 1)
+
+	for i, host := range nodes {
+		var rootIndex = i % len(rootCerts)
+		var priv = privs[rootIndex]
+		var rootCert = rootCerts[rootIndex]
+
 		nodePrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
 			log.Fatalf("Failed to generate private key: %v", err)
@@ -197,12 +224,12 @@ func handleNodeCerts(nodes []string, now time.Time, priv *rsa.PrivateKey, rootCe
 				}
 			}()
 
-			err = sftpCli.Mkdir("/opt/couchbase/var/lib/couchbase/inbox")
+			err = sftpCli.MkdirAll("/opt/couchbase/var/lib/couchbase/inbox")
 			if err != nil {
 				log.Printf("Failed to create inbox: %v\n", err)
 			}
 
-			err = cbcerthelper.WriteRemoteCert("/opt/couchbase/var/lib/couchbase/inbox/chain.pem", "CERTIFICATE",
+			err = cbcerthelper.WriteRemoteCert("/opt/couchbase/var/lib/couchbase/inbox/chain.pem", cbcerthelper.CertTypeCertificate,
 				nodeCertBytes, sftpCli)
 			if err != nil {
 				log.Fatal(err)
@@ -212,11 +239,34 @@ func handleNodeCerts(nodes []string, now time.Time, priv *rsa.PrivateKey, rootCe
 			if err != nil {
 				log.Fatal(err)
 			}
+
+			if supportsMultipleRoots {
+				err = sftpCli.MkdirAll("/opt/couchbase/var/lib/couchbase/inbox/CA")
+				if err != nil {
+					log.Printf("Failed to create inbox: %v\n", err)
+				}
+
+				for i, cert := range rootCerts {
+					err = cbcerthelper.WriteRemoteCert(fmt.Sprintf("/opt/couchbase/var/lib/couchbase/inbox/CA/ca_%d.pem", i), cbcerthelper.CertTypeCertificate,
+						cert.Raw, sftpCli)
+					if err != nil {
+						log.Fatal(err)
+					}
+				}
+
+				err = cbcerthelper.LoadTrustedCAs(httpUser, httpPass, host)
+				if err != nil {
+					log.Fatal(err)
+				}
+			}
+
 		}()
 
-		err = cbcerthelper.UploadClusterCA(rootCert.Raw, httpUser, httpPass, host)
-		if err != nil {
-			log.Fatal(err)
+		if !supportsMultipleRoots {
+			err = cbcerthelper.UploadClusterCA(rootCert.Raw, httpUser, httpPass, host)
+			if err != nil {
+				log.Fatal(err)
+			}
 		}
 
 		err = cbcerthelper.ReloadClusterCert(httpUser, httpPass, host)
@@ -226,7 +276,7 @@ func handleNodeCerts(nodes []string, now time.Time, priv *rsa.PrivateKey, rootCe
 	}
 }
 
-func handleClientCert(now time.Time, caPrivateKey *rsa.PrivateKey, caCert *x509.Certificate, certUser, certEmail string) {
+func handleClientCert(now time.Time, caPrivateKeys []*rsa.PrivateKey, caCerts []*x509.Certificate, certUser, certEmail string) {
 	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		log.Fatalf("Failed to generate private key: %v", err)
@@ -236,6 +286,9 @@ func handleClientCert(now time.Time, caPrivateKey *rsa.PrivateKey, caCert *x509.
 	if err != nil {
 		log.Fatalf("Failed to create client cert request: %v", err)
 	}
+
+	var caPrivateKey = caPrivateKeys[0]
+	var caCert = caCerts[0]
 
 	_, clientCertBytes, err := cbcerthelper.CreateClientCert(now, now.Add(365*24*time.Hour), caPrivateKey, caCert,
 		clientCSR, certEmail)
@@ -274,4 +327,19 @@ func dial(username, password, host string) (*ssh.Client, error) {
 	}
 
 	return conn, nil
+}
+
+func tuple(version string) (int, int, int) {
+	v := strings.Split(version, "-")[0]
+	parsed := strings.Split(v, ".")
+
+	if len(parsed) != 3 {
+		return 0, 0, 0
+	}
+
+	major, _ := strconv.Atoi(parsed[0])
+	minor, _ := strconv.Atoi(parsed[1])
+	patch, _ := strconv.Atoi(parsed[2])
+
+	return major, minor, patch
 }
