@@ -117,18 +117,23 @@ func generate() {
 
 	nodes := strings.Split(fHosts, ",")
 
-	var privs = []*rsa.PrivateKey{}
+	var intPrivs = []*rsa.PrivateKey{}
+	var intCerts = []*x509.Certificate{}
 	var rootCerts = []*x509.Certificate{}
+	var intBytes = [][]byte{}
 
 	now := time.Now()
 	for rootIndex := 0; rootIndex < fNumRoots; rootIndex++ {
 		priv, rootCert := handleRootCert(now, rootIndex)
-		privs = append(privs, priv)
 		rootCerts = append(rootCerts, rootCert)
+		intPriv, intCert, intCertBytes := handleIntCert(now, priv, rootCert, rootIndex, fCertUser, fCertEmail)
+		intPrivs = append(intPrivs, intPriv)
+		intCerts = append(intCerts, intCert)
+		intBytes = append(intBytes, intCertBytes)
 	}
 
-	handleClientCert(now, privs, rootCerts, fCertUser, fCertEmail)
-	handleNodeCerts(nodes, now, privs, rootCerts, fHttpUser, fHttpPass, fSshUser, fSshPass, fClusterVersion)
+	handleClientCert(now, intPrivs, intCerts, intBytes, fCertUser, fCertEmail)
+	handleNodeCerts(nodes, now, intPrivs, intCerts, rootCerts, intBytes, fHttpUser, fHttpPass, fSshUser, fSshPass, fClusterVersion)
 
 	err := cbcerthelper.CreateCABundle(fNumRoots, "ca")
 	if err != nil {
@@ -167,16 +172,56 @@ func handleRootCert(now time.Time, rootIndex int) (*rsa.PrivateKey, *x509.Certif
 	return priv, rootCert
 }
 
-func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, rootCerts []*x509.Certificate, httpUser, httpPass,
+func handleIntCert(now time.Time, priv *rsa.PrivateKey, rootCert *x509.Certificate, rootIndex int, certUser, certEmail string) (*rsa.PrivateKey, *x509.Certificate, []byte) {
+	intKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Fatalf("Failed to generate private key: %v", err)
+	}
+
+	intCSR, intCSRBytes, err := cbcerthelper.CreateClientCertReq("ClientAndServerSigningCA", intKey)
+	if err != nil {
+		log.Fatalf("Failed to create client cert request: %v", err)
+	}
+
+	intCert, intCertBytes, err := cbcerthelper.CreateIntCert(now, now.Add(365*24*time.Hour), priv, rootCert,
+		intCSR, certEmail)
+	if err != nil {
+		log.Fatalf("Failed to create client cert: %v", err)
+	}
+
+	name := "int_" + strconv.Itoa(rootIndex)
+
+	err = cbcerthelper.WriteLocalCert(fmt.Sprintf("%s.csr", name), cbcerthelper.CertTypeCertificateRequest, intCSRBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = cbcerthelper.WriteLocalCert(fmt.Sprintf("%s.pem", name), cbcerthelper.CertTypeCertificate, intCertBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = cbcerthelper.WriteLocalKey(fmt.Sprintf("%s.key", name), intKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return intKey, intCert, intCertBytes
+
+}
+
+func handleNodeCerts(nodes []string, now time.Time, intPrivs []*rsa.PrivateKey, intCerts, rootCerts []*x509.Certificate, intBytess [][]byte, httpUser, httpPass,
 	sshUser, sshPass, clusterVersion string) {
 
 	major, minor, _ := tuple(clusterVersion)
 	supportsMultipleRoots := major > 7 || (major == 7 && minor >= 1)
 
 	for i, host := range nodes {
-		var rootIndex = i % len(rootCerts)
-		var priv = privs[rootIndex]
+		var rootIndex = i % len(intCerts)
+		var intPriv = intPrivs[rootIndex]
+		var intCert = intCerts[rootIndex]
 		var rootCert = rootCerts[rootIndex]
+		var intBytes = intBytess[rootIndex]
 
 		nodePrivKey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
@@ -188,7 +233,7 @@ func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, roo
 			log.Fatalf("Failed to create certificate request: %v", err)
 		}
 
-		_, nodeCertBytes, err := cbcerthelper.CreateNodeCert(now, now.Add(365*24*time.Hour), priv, host, rootCert, nodeCSR)
+		_, nodeCertBytes, err := cbcerthelper.CreateNodeCert(now, now.Add(365*24*time.Hour), intPriv, host, intCert, nodeCSR)
 		if err != nil {
 			log.Fatalf("Failed to create node certificate: %v", err)
 		}
@@ -229,10 +274,15 @@ func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, roo
 				log.Printf("Failed to create inbox: %v\n", err)
 			}
 
-			err = cbcerthelper.WriteRemoteCert("/opt/couchbase/var/lib/couchbase/inbox/chain.pem", cbcerthelper.CertTypeCertificate,
-				nodeCertBytes, sftpCli)
-			if err != nil {
-				log.Fatal(err)
+			{
+				var chain = [][]byte{}
+				chain = append(chain, nodeCertBytes)
+				chain = append(chain, intBytes)
+				err = cbcerthelper.WriteRemoteCerts("/opt/couchbase/var/lib/couchbase/inbox/chain.pem", cbcerthelper.CertTypeCertificate,
+					chain, sftpCli)
+				if err != nil {
+					log.Fatal(err)
+				}
 			}
 
 			err = cbcerthelper.WriteRemoteKey("/opt/couchbase/var/lib/couchbase/inbox/pkey.key", nodePrivKey, sftpCli)
@@ -276,7 +326,7 @@ func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, roo
 	}
 }
 
-func handleClientCert(now time.Time, caPrivateKeys []*rsa.PrivateKey, caCerts []*x509.Certificate, certUser, certEmail string) {
+func handleClientCert(now time.Time, intPrivateKeys []*rsa.PrivateKey, intCerts []*x509.Certificate, intBytes [][]byte, certUser, certEmail string) {
 	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		log.Fatalf("Failed to generate private key: %v", err)
@@ -287,21 +337,26 @@ func handleClientCert(now time.Time, caPrivateKeys []*rsa.PrivateKey, caCerts []
 		log.Fatalf("Failed to create client cert request: %v", err)
 	}
 
-	var caPrivateKey = caPrivateKeys[0]
-	var caCert = caCerts[0]
+	var intPrivateKey = intPrivateKeys[0]
+	var intCert = intCerts[0]
+	var intByte = intBytes[0]
 
-	_, clientCertBytes, err := cbcerthelper.CreateClientCert(now, now.Add(365*24*time.Hour), caPrivateKey, caCert,
+	_, clientCertBytes, err := cbcerthelper.CreateClientCert(now, now.Add(365*24*time.Hour), intPrivateKey, intCert,
 		clientCSR, certEmail)
 	if err != nil {
 		log.Fatalf("Failed to create client cert: %v", err)
 	}
+
+	clientBundle := [][]byte{}
+	clientBundle = append(clientBundle, clientCertBytes)
+	clientBundle = append(clientBundle, intByte)
 
 	err = cbcerthelper.WriteLocalCert("client.csr", cbcerthelper.CertTypeCertificateRequest, clientCSRBytes)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = cbcerthelper.WriteLocalCert("client.pem", cbcerthelper.CertTypeCertificate, clientCertBytes)
+	err = cbcerthelper.WriteLocalCerts("client.pem", cbcerthelper.CertTypeCertificate, clientBundle)
 	if err != nil {
 		log.Fatal(err)
 	}
