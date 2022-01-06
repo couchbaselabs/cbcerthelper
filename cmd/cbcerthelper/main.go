@@ -25,6 +25,7 @@ import (
 
 var fConfigPath, fHosts, fHttpUser, fHttpPass, fSshUser, fSshPass, fCertUser, fCertEmail, fClusterVersion string
 var fNumRoots int
+var fUseSecure bool
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
@@ -51,6 +52,7 @@ func init() {
 	generateCmd.PersistentFlags().StringVar(&fCertEmail, "cert-email", "", "Email address to generate certificate for")
 	generateCmd.PersistentFlags().IntVar(&fNumRoots, "num-roots", 1, "Number of root CAs to generate")
 	generateCmd.PersistentFlags().StringVar(&fClusterVersion, "cluster-version", "0.0.0", "Cluster version")
+	generateCmd.PersistentFlags().BoolVar(&fUseSecure, "use-secure", false, "Use secure (TLS) communication")
 
 }
 
@@ -135,7 +137,7 @@ func generate() {
 		log.Fatal(err)
 	}
 
-	err = cbcerthelper.EnableClientCertAuth(fHttpUser, fHttpPass, nodes[0])
+	err = cbcerthelper.EnableClientCertAuth(fHttpUser, fHttpPass, nodes[0], fUseSecure)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -254,7 +256,7 @@ func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, roo
 					}
 				}
 
-				err = cbcerthelper.LoadTrustedCAs(httpUser, httpPass, host)
+				err = cbcerthelper.LoadTrustedCAs(httpUser, httpPass, host, fUseSecure)
 				if err != nil {
 					log.Fatal(err)
 				}
@@ -263,13 +265,13 @@ func handleNodeCerts(nodes []string, now time.Time, privs []*rsa.PrivateKey, roo
 		}()
 
 		if !supportsMultipleRoots {
-			err = cbcerthelper.UploadClusterCA(rootCert.Raw, httpUser, httpPass, host)
+			err = cbcerthelper.UploadClusterCA(rootCert.Raw, httpUser, httpPass, host, fUseSecure)
 			if err != nil {
 				log.Fatal(err)
 			}
 		}
 
-		err = cbcerthelper.ReloadClusterCert(httpUser, httpPass, host)
+		err = cbcerthelper.ReloadClusterCert(httpUser, httpPass, host, fUseSecure)
 		if err != nil {
 			log.Fatal(err)
 		}

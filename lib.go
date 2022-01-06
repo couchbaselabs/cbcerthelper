@@ -32,7 +32,23 @@ const (
 	CertTypeCertificate        = "CERTIFICATE"
 )
 
-func EnableClientCertAuth(username, password, host string) error {
+func restProtocol(useSecure bool) string {
+	if useSecure {
+		return "https"
+	}
+
+	return "http"
+}
+
+func restPort(useSecure bool) string {
+	if useSecure {
+		return "18091"
+	}
+
+	return "8091"
+}
+
+func EnableClientCertAuth(username, password, host string, useSecure bool) error {
 	bodyStr := `
 {
   "state": "enable",
@@ -47,7 +63,7 @@ func EnableClientCertAuth(username, password, host string) error {
 `
 	req, err := http.NewRequest(
 		"POST",
-		fmt.Sprintf("http://%s:%s@%s:8091/settings/clientCertAuth", username, password, host),
+		fmt.Sprintf("%s://%s:%s@%s:%s/settings/clientCertAuth", restProtocol(useSecure), username, password, host, restPort(useSecure)),
 		strings.NewReader(bodyStr),
 	)
 	if err != nil {
@@ -71,10 +87,10 @@ func EnableClientCertAuth(username, password, host string) error {
 	return errors.Wrap(errors.New(string(b)), "server responded with error")
 }
 
-func ReloadClusterCert(username, password, host string) error {
+func ReloadClusterCert(username, password, host string, useSecure bool) error {
 	req, err := http.NewRequest(
 		"POST",
-		fmt.Sprintf("http://%s:%s@%s:8091/node/controller/reloadCertificate", username, password, host),
+		fmt.Sprintf("%s://%s:%s@%s:%s/node/controller/reloadCertificate", restProtocol(useSecure), username, password, host, restPort(useSecure)),
 		nil,
 	)
 	if err != nil {
@@ -98,7 +114,7 @@ func ReloadClusterCert(username, password, host string) error {
 	return nil
 }
 
-func UploadClusterCA(caBytes []byte, username, password, host string) error {
+func UploadClusterCA(caBytes []byte, username, password, host string, useSecure bool) error {
 	var bCert bytes.Buffer
 	bWriter := bufio.NewWriter(&bCert)
 
@@ -112,7 +128,7 @@ func UploadClusterCA(caBytes []byte, username, password, host string) error {
 
 	req, err := http.NewRequest(
 		"POST",
-		fmt.Sprintf("http://%s:%s@%s:8091/controller/uploadClusterCA", username, password, host),
+		fmt.Sprintf("%s://%s:%s@%s:%s/controller/uploadClusterCA", restProtocol(useSecure), username, password, host, restPort(useSecure)),
 		bytes.NewReader(bCert.Bytes()),
 	)
 	if err != nil {
@@ -136,10 +152,10 @@ func UploadClusterCA(caBytes []byte, username, password, host string) error {
 	return nil
 }
 
-func LoadTrustedCAs(username, password, host string) error {
+func LoadTrustedCAs(username, password, host string, useSecure bool) error {
 	req, err := http.NewRequest(
 		"POST",
-		fmt.Sprintf("http://%s:%s@%s:8091/node/controller/loadTrustedCAs", username, password, host),
+		fmt.Sprintf("%s://%s:%s@%s:%s/node/controller/loadTrustedCAs", restProtocol(useSecure), username, password, host, restPort(useSecure)),
 		nil,
 	)
 	if err != nil {
