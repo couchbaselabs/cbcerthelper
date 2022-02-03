@@ -217,7 +217,13 @@ func CreateNodeCert(notBefore, notAfter time.Time, caKey *rsa.PrivateKey, node s
 		IsCA:                  false,
 		AuthorityKeyId:        []byte("keyid,issues:always"),
 		SubjectKeyId:          []byte("hash"),
-		IPAddresses:           []net.IP{net.ParseIP(node)},
+	}
+
+	ip := net.ParseIP(node)
+	if ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{node}
 	}
 
 	nodeCertBytes, err := x509.CreateCertificate(rand.Reader, &template, ca, csr.PublicKey, caKey)
