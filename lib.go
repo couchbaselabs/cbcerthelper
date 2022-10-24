@@ -271,6 +271,49 @@ func CreateRootCert(notBefore, notAfter time.Time, priv *rsa.PrivateKey) (*x509.
 	return rootCert, rootCertBytes, nil
 }
 
+func CreateIntCert(notBefore, notAfter time.Time, caKey *rsa.PrivateKey, ca *x509.Certificate,
+	csr *x509.CertificateRequest, certEmail string) (*x509.Certificate, []byte, error) {
+
+	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate serial number: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+
+		Signature:          csr.Signature,
+		SignatureAlgorithm: csr.SignatureAlgorithm,
+
+		PublicKey:          csr.PublicKey,
+		PublicKeyAlgorithm: csr.PublicKeyAlgorithm,
+
+		Issuer:  ca.Subject,
+		Subject: csr.Subject,
+
+		NotBefore: notBefore,
+		NotAfter:  notAfter,
+
+		KeyUsage: x509.KeyUsageCRLSign | x509.KeyUsageCertSign,
+		// ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		// EmailAddresses:        []string{certEmail},
+	}
+
+	clientCertBytes, err := x509.CreateCertificate(rand.Reader, &template, ca, csr.PublicKey, caKey)
+	if err != nil {
+		log.Fatalf("Failed to create node certificate: %v", err)
+	}
+
+	clientCert, err := x509.ParseCertificate(clientCertBytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse node certificate: %v", err)
+	}
+
+	return clientCert, clientCertBytes, nil
+}
+
 func CreateClientCert(notBefore, notAfter time.Time, caKey *rsa.PrivateKey, ca *x509.Certificate,
 	csr *x509.CertificateRequest, certEmail string) (*x509.Certificate, []byte, error) {
 
@@ -332,6 +375,22 @@ func WriteLocalCert(name, certType string, certBytes []byte) error {
 	return nil
 }
 
+func WriteLocalCerts(name, certType string, allCertBytes [][]byte) error {
+	certOut, err := os.Create(name)
+	if err != nil {
+		return fmt.Errorf("failed to open %s for writing: %v", name, err)
+	}
+	for _, certBytes := range allCertBytes {
+		if err := pem.Encode(certOut, &pem.Block{Type: certType, Bytes: certBytes}); err != nil {
+			return fmt.Errorf("failed to write data to %s: %v", name, err)
+		}
+	}
+	if err := certOut.Close(); err != nil {
+		return fmt.Errorf("error closing %s: %v", name, err)
+	}
+	return nil
+}
+
 func CreateCABundle(numRoots int, prefix string) error {
 	name := prefix + ".pem"
 	bundle, err := os.Create(name)
@@ -372,6 +431,22 @@ func WriteRemoteCert(path, certType string, certBytes []byte, sftpCli *sftp.Clie
 	}
 	if err := pem.Encode(f, &pem.Block{Type: certType, Bytes: certBytes}); err != nil {
 		return fmt.Errorf("failed to write data to %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("error closing %s: %v", path, err)
+	}
+	return nil
+}
+
+func WriteRemoteCerts(path, certType string, certBytess [][]byte, sftpCli *sftp.Client) error {
+	f, err := sftpCli.Create(path)
+	if err != nil {
+		return err
+	}
+	for _, certBytes := range certBytess {
+		if err := pem.Encode(f, &pem.Block{Bytes: certBytes, Type: certType}); err != nil {
+			return fmt.Errorf("failed to write data to %s: %v", path, err)
+		}
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("error closing %s: %v", path, err)
